@@ -1,29 +1,22 @@
-# import inspect
-# import logging
-import math
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import torch
+from diffusers.loaders import TextualInversionLoaderMixin
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.models.attention_processor import Attention
 from diffusers.pipelines.stable_diffusion import (
     StableDiffusionAttendAndExcitePipeline,
-    StableDiffusionPipeline,
     StableDiffusionPipelineOutput,
-    StableDiffusionSafetyChecker
+    StableDiffusionSafetyChecker,
 )
-from diffusers.loaders import TextualInversionLoaderMixin
 
-# from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_attend_and_excite import (
-#     AttentionStore
-# )
 from diffusers.schedulers import KarrasDiffusionSchedulers
-from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 from diffusers.utils import logging
-
-import torch
-from typing import Any, Callable, Dict, List, Optional, Union, Tuple
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
 logger = logging.get_logger(__name__)
+
 
 class AttentionStore:
     @staticmethod
@@ -32,8 +25,8 @@ class AttentionStore:
 
     def __call__(self, attn, is_cross: bool, place_in_unet: str):
         if is_cross:
-            # if attn.shape[1] == self.attn_res**2:
-            self.step_store[place_in_unet].append(attn)
+            if attn.shape[1] in self.attn_res:
+                self.step_store[place_in_unet].append(attn)
 
         self.cur_att_layer += 1
         if self.cur_att_layer == self.num_att_layers:
@@ -44,30 +37,15 @@ class AttentionStore:
         self.attention_store = self.step_store
         self.step_store = self.get_empty_store()
 
-    def get_average_attention(self):
-        average_attention = self.attention_store
-        return average_attention
-
-    def aggregate_attention(self, from_where: List[str]) -> torch.Tensor:
-        """Aggregates the attention across the different layers and heads at the specified resolution."""
-        out = []
-        attention_maps = self.get_average_attention()
-        for location in from_where:
-            for item in attention_maps[location]:
-                # cross_maps = item.reshape(-1, self.attn_res, self.attn_res, item.shape[-1])
-                # out.append(cross_maps)
-                out.append(item)
-        out = torch.cat(out, dim=0)
-        out = out.sum(0) / out.shape[0]
-        return out
+    def maps(self, block_type: str):
+        return self.attention_store[block_type]
 
     def reset(self):
         self.cur_att_layer = 0
         self.step_store = self.get_empty_store()
         self.attention_store = {}
 
-    # def __init__(self, attn_res=16):
-    def __init__(self):
+    def __init__(self, attn_res=[256, 64]):
         """
         Initialize an empty AttentionStore :param step_index: used to visualize only a specific step in the diffusion
         process
@@ -77,23 +55,35 @@ class AttentionStore:
         self.step_store = self.get_empty_store()
         self.attention_store = {}
         self.curr_step_index = 0
-        # self.attn_res = attn_res
+        self.attn_res = attn_res
 
 
-class AttendExciteAttnProcessor:
+class LayoutGuidanceAttnProcessor:
     def __init__(self, attnstore, place_in_unet):
         super().__init__()
         self.attnstore = attnstore
         self.place_in_unet = place_in_unet
 
-    def __call__(self, attn: Attention, hidden_states, encoder_hidden_states=None, attention_mask=None):
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+    ):
         batch_size, sequence_length, _ = hidden_states.shape
-        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+        attention_mask = attn.prepare_attention_mask(
+            attention_mask, sequence_length, batch_size
+        )
 
         query = attn.to_q(hidden_states)
 
         is_cross = encoder_hidden_states is not None
-        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
+        encoder_hidden_states = (
+            encoder_hidden_states
+            if encoder_hidden_states is not None
+            else hidden_states
+        )
         key = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
@@ -117,6 +107,7 @@ class AttendExciteAttnProcessor:
 
         return hidden_states
 
+
 class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeline):
     def __init__(
         self,
@@ -129,7 +120,16 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         feature_extractor: CLIPImageProcessor,
         requires_safety_checker: bool = True,
     ):
-        super().__init__(vae, text_encoder, tokenizer, unet, scheduler, safety_checker, feature_extractor, requires_safety_checker)
+        super().__init__(
+            vae,
+            text_encoder,
+            tokenizer,
+            unet,
+            scheduler,
+            safety_checker,
+            feature_extractor,
+            requires_safety_checker,
+        )
 
     def _encode_prompt(
         self,
@@ -185,11 +185,13 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                 return_tensors="pt",
             )
             text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+            untruncated_ids = self.tokenizer(
+                prompt, padding="longest", return_tensors="pt"
+            ).input_ids
 
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[
+                -1
+            ] and not torch.equal(text_input_ids, untruncated_ids):
                 removed_text = self.tokenizer.batch_decode(
                     untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
                 )
@@ -198,7 +200,10 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                     f" {self.tokenizer.model_max_length} tokens: {removed_text}"
                 )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            if (
+                hasattr(self.text_encoder.config, "use_attention_mask")
+                and self.text_encoder.config.use_attention_mask
+            ):
                 attention_mask = text_inputs.attention_mask.to(device)
             else:
                 attention_mask = None
@@ -214,7 +219,9 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         bs_embed, seq_len, _ = prompt_embeds.shape
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.view(
+            bs_embed * num_images_per_prompt, seq_len, -1
+        )
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
@@ -250,7 +257,10 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                 return_tensors="pt",
             )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            if (
+                hasattr(self.text_encoder.config, "use_attention_mask")
+                and self.text_encoder.config.use_attention_mask
+            ):
                 attention_mask = uncond_input.attention_mask.to(device)
             else:
                 attention_mask = None
@@ -265,10 +275,16 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
 
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+            negative_prompt_embeds = negative_prompt_embeds.to(
+                dtype=self.text_encoder.dtype, device=device
+            )
 
-            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            negative_prompt_embeds = negative_prompt_embeds.repeat(
+                1, num_images_per_prompt, 1
+            )
+            negative_prompt_embeds = negative_prompt_embeds.view(
+                batch_size * num_images_per_prompt, seq_len, -1
+            )
 
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
@@ -290,10 +306,13 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         negative_prompt_embeds=None,
     ):
         if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+            raise ValueError(
+                f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
+            )
 
         if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
+            callback_steps is not None
+            and (not isinstance(callback_steps, int) or callback_steps <= 0)
         ):
             raise ValueError(
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
@@ -309,8 +328,12 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
             raise ValueError(
                 "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
             )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        elif prompt is not None and (
+            not isinstance(prompt, str) and not isinstance(prompt, list)
+        ):
+            raise ValueError(
+                f"`prompt` has to be of type `str` or `list` but is {type(prompt)}"
+            )
 
         if negative_prompt is not None and negative_prompt_embeds is not None:
             raise ValueError(
@@ -326,19 +349,56 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                     f" {negative_prompt_embeds.shape}."
                 )
 
-        # TODO: write these and for bboxes
-        # indices_is_list_ints = isinstance(token_indices_bbox, list) and isinstance(token_indices_bbox[0], Tuple)
-        # indices_is_list_list_ints = (
-        #     isinstance(token_indices_bbox, list) and isinstance(token_indices_bbox[0], Tuple) and isinstance(token_indices_bbox[0][0], List) and isinstance(token_indices_bbox[0][0][0], int)
-        # )
-        #
-        # if not indices_is_list_ints and not indices_is_list_list_ints:
-        #     raise TypeError("`indices` must be a list of ints or a list of a list of ints")
-        #
-        # if indices_is_list_ints:
-        #     indices_batch_size = 1
-        # elif indices_is_list_list_ints:
-        #     indices_batch_size = len(indices)
+        if token_indices is not None:
+            if isinstance(token_indices, list):
+                if isinstance(token_indices[0], list):
+                    if isinstance(token_indices[0][0], list):
+                        token_indices_batch_size = len(token_indices)
+                    elif isinstance(token_indices[0][0], int):
+                        token_indices_batch_size = 1
+                    else:
+                        raise TypeError(
+                            "`token_indices` must be a list of lists of integers or a list of integers."
+                        )
+                else:
+                    raise TypeError(
+                        "`token_indices` must be a list of lists of integers or a list of integers."
+                    )
+            else:
+                raise TypeError(
+                    "`token_indices` must be a list of lists of integers or a list of integers."
+                )
+
+        if bboxes is not None:
+            if isinstance(bboxes, list):
+                if isinstance(bboxes[0], list):
+                    if (
+                        isinstance(bboxes[0][0], list)
+                        and len(bboxes[0][0]) == 4
+                        and all(isinstance(x, float) for x in bboxes[0][0])
+                    ):
+                        bboxes_batch_size = len(bboxes)
+                    elif (
+                        isinstance(bboxes[0], list)
+                        and len(bboxes[0]) == 4
+                        and all(isinstance(x, float) for x in bboxes[0])
+                    ):
+                        bboxes_batch_size = 1
+                    else:
+                        print(isinstance(bboxes[0], list), len(bboxes[0]))
+                        raise TypeError(
+                            "`bboxes` must be a list of lists of list with four floats or a list of tuples with four floats."
+                        )
+                else:
+                    print(isinstance(bboxes[0], list), len(bboxes[0]))
+                    raise TypeError(
+                        "`bboxes` must be a list of lists of list with four floats or a list of tuples with four floats."
+                    )
+            else:
+                print(isinstance(bboxes[0], list), len(bboxes[0]))
+                raise TypeError(
+                    "`bboxes` must be a list of lists of list with four floats or a list of tuples with four floats."
+                )
 
         if prompt is not None and isinstance(prompt, str):
             prompt_batch_size = 1
@@ -347,55 +407,72 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         elif prompt_embeds is not None:
             prompt_batch_size = prompt_embeds.shape[0]
 
-        # if indices_batch_size != prompt_batch_size:
-        #     raise ValueError(
-        #         f"indices batch size must be same as prompt batch size. indices batch size: {indices_batch_size}, prompt batch size: {prompt_batch_size}"
-        #     )
+        if token_indices_batch_size != prompt_batch_size:
+            raise ValueError(
+                f"token indices batch size must be same as prompt batch size. token indices batch size: {token_indices_batch_size}, prompt batch size: {prompt_batch_size}"
+            )
 
-    # TODO: batch computation
+        if bboxes_batch_size != prompt_batch_size:
+            raise ValueError(
+                f"bbox batch size must be same as prompt batch size. bbox batch size: {bboxes_batch_size}, prompt batch size: {prompt_batch_size}"
+            )
+
     def _compute_loss(self, token_indices, bboxes, device) -> torch.Tensor:
         loss = 0
         object_number = len(bboxes)
-        total = 0
-        for location in ["up", "mid"]:
-            for attn_map_integrated in self.attention_store.attention_store[location]:
-                if location == "up" and attn_map_integrated.shape[1] != 256:
-                    continue
+        total_maps = 0
+        for location in ["mid", "up"]:
+            for attn_map_integrated in self.attention_store.maps(location):
                 attn_map = attn_map_integrated.chunk(2)[1]
 
                 b, i, j = attn_map.shape
                 H = W = int(np.sqrt(i))
-                # print(H, W)
-                total += 1
-                # print(len(self.attention_store.attention_store[location]), attn_map_integrated.shape, attn_map.shape, H, W, attn_map[0][0][0], location)
+
+                total_maps += 1
+                print(
+                    len(self.attention_store.attention_store[location]),
+                    attn_map_integrated.shape,
+                    attn_map.shape,
+                    H,
+                    W,
+                    attn_map[0][0][0],
+                    location,
+                )
                 for obj_idx in range(object_number):
                     obj_loss = 0
-                    mask = torch.zeros(size=(H, W)).to(device)
                     obj_box = bboxes[obj_idx]
 
-                    x_min, y_min, x_max, y_max = int(obj_box[0] * W), \
-                        int(obj_box[1] * H), int(obj_box[2] * W), int(obj_box[3] * H)
-                    mask[y_min: y_max, x_min: x_max] = 1
-                    # print(y_min, y_max, x_min, x_max, mask[0][0])
+                    x_min, y_min, x_max, y_max = (
+                        obj_box[0] * W,
+                        obj_box[1] * H,
+                        obj_box[2] * W,
+                        obj_box[3] * H,
+                    )
+                    mask = torch.zeros((H, W), device=device)
+                    mask[round(y_min) : round(y_max), round(x_min) : round(x_max)] = 1
+
                     for obj_position in token_indices[obj_idx]:
                         ca_map_obj = attn_map[:, :, obj_position].reshape(b, H, W)
-                        activation_value = (ca_map_obj * mask).reshape(b, -1).sum(dim=-1) / ca_map_obj.reshape(b,
-                                                                                                               -1).sum(
-                            dim=-1)
-                        # print(activation_value, ca_map_obj[0][0][0])
-                        obj_loss += torch.mean((1 - activation_value) ** 2)
-                        # print(location, token_indices[obj_idx], obj_loss)
-                    loss += (obj_loss / len(token_indices[obj_idx]))
+                        activation_value = (ca_map_obj * mask).reshape(b, -1).sum(
+                            dim=-1
+                        ) / ca_map_obj.reshape(b, -1).sum(dim=-1)
 
-        loss = loss / (object_number * total)
+                        obj_loss += torch.mean((1 - activation_value) ** 2)
+
+                    loss += obj_loss / len(token_indices[obj_idx])
+
+        loss /= object_number * total_maps
         return loss
 
     @torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
-        token_indices: List[List[int]] = None,
-        bboxes: List[Tuple[float, float, float, float]] = None,
+        token_indices: Union[List[List[List[int]]], List[List[int]]] = None,
+        bboxes: Union[
+            List[List[List[float]]],
+            List[List[float]],
+        ] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
@@ -411,7 +488,10 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
-        cross_attention_kwargs: Optional[Dict[str, Any]] = None
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        max_guidance_iter: int = 10,
+        max_guidance_iter_per_step: int = 5,
+        scale_factor: int = 50,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -420,6 +500,10 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
+            token_indices (Union[List[List[List[int]]], List[List[int]]], optional):
+                The list of the indexes in the prompt to layout. Defaults to None.
+            bboxes (Union[List[List[List[float]]], List[List[float]]], optional):
+                The bounding boxes of the indexes to maintain layout in the image. Defaults to None.
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -472,6 +556,12 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
                 `self.processor` in
                 [diffusers.cross_attention](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/cross_attention.py).
+            max_guidance_iter (`int`, *optional*, defaults to `10`):
+                The maximum number of iterations for the layout guidance on attention maps in diffusion mode.
+            max_guidance_iter_per_step (`int`, *optional*, defaults to `5`):
+                The maximum number of iterations to run during each time step for layout guidance.
+            scale_factor (`int`, *optional*, defaults to `50`):
+                The scale factor used to update the latents during optimization.
 
         Examples:
 
@@ -488,7 +578,15 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
-            prompt, token_indices, bboxes, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds
+            prompt,
+            token_indices,
+            bboxes,
+            height,
+            width,
+            callback_steps,
+            negative_prompt,
+            prompt_embeds,
+            negative_prompt_embeds,
         )
 
         # 2. Define call parameters
@@ -543,36 +641,49 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
 
         loss = torch.tensor(10000)
-        print(prompt_embeds.shape, cond_prompt_embeds.shape)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                print("starting iteration ", i, t, latents[0][0][0][0])
-                with torch.enable_grad():
-                    iteration = 0
-                    latents = latents.clone().detach().requires_grad_(True)
+                # Layout guidance loss optimization loop
+                if i < max_guidance_iter:
+                    with torch.enable_grad():
+                        latents = latents.clone().detach().requires_grad_(True)
 
-                    while loss.item() / 50 > 0.2 and iteration < 5 and i < 10:
-                        latent_model_input = self.scheduler.scale_model_input(latents, t)
-                        self.unet(
-                            latent_model_input,
-                            t,
-                            encoder_hidden_states=cond_prompt_embeds,
-                            cross_attention_kwargs=cross_attention_kwargs,
-                        )
-                        self.unet.zero_grad()
+                        for guidance_iter in range(max_guidance_iter_per_step):
+                            if loss.item() / scale_factor < 0.2:
+                                break
 
-                        loss = self._compute_loss(token_indices, bboxes, device) * 50
-                        grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents], retain_graph=True)[0]
-                        latents = latents - grad_cond * self.scheduler.sigmas[i] ** 2
+                            latent_model_input = self.scheduler.scale_model_input(
+                                latents, t
+                            )
+                            self.unet(
+                                latent_model_input,
+                                t,
+                                encoder_hidden_states=cond_prompt_embeds,
+                                cross_attention_kwargs=cross_attention_kwargs,
+                            )
+                            self.unet.zero_grad()
 
-                        iteration += 1
-                        print(loss, iteration, i)
+                            loss = (
+                                self._compute_loss(token_indices, bboxes, device)
+                                * scale_factor
+                            )
+                            grad_cond = torch.autograd.grad(
+                                loss.requires_grad_(True), [latents], retain_graph=True
+                            )[0]
+                            latents = (
+                                latents - grad_cond * self.scheduler.sigmas[i] ** 2
+                            )
 
-                # print("in iteration ", i, t, latents[0][0][0][0])
+                            print(loss, guidance_iter, i)
+
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = (
+                    torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                )
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -585,13 +696,19 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs
+                ).prev_sample
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
@@ -604,7 +721,9 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
             image = self.decode_latents(latents)
 
             # 9. Run safety checker
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            image, has_nsfw_concept = self.run_safety_checker(
+                image, device, prompt_embeds.dtype
+            )
 
             # 10. Convert to PIL
             image = self.numpy_to_pil(image)
@@ -613,7 +732,9 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
             image = self.decode_latents(latents)
 
             # 9. Run safety checker
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            image, has_nsfw_concept = self.run_safety_checker(
+                image, device, prompt_embeds.dtype
+            )
 
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
@@ -622,4 +743,6 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
         if not return_dict:
             return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        return StableDiffusionPipelineOutput(
+            images=image, nsfw_content_detected=has_nsfw_concept
+        )

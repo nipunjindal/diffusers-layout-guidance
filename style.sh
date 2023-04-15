@@ -14,7 +14,7 @@ do
 done
 
 # Change to the root directory of your project
-cd layoutguidance
+cd tflcg
 
 # Run isort to sort imports
 isort .

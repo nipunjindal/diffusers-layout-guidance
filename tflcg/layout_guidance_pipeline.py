@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -10,11 +10,10 @@ from diffusers.pipelines.stable_diffusion import (
     StableDiffusionPipelineOutput,
     StableDiffusionSafetyChecker,
 )
-
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import logging
-from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 from PIL import Image, ImageDraw
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
 logger = logging.get_logger(__name__)
 
@@ -459,7 +458,12 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
     def get_indices(self, prompt: str) -> Dict[str, int]:
         """Utility function to list the indices of the tokens you wish to alte"""
         ids = self.tokenizer(prompt).input_ids
-        indices = {i: tok for tok, i in zip(self.tokenizer.convert_ids_to_tokens(ids), range(len(ids)))}
+        indices = {
+            i: tok
+            for tok, i in zip(
+                self.tokenizer.convert_ids_to_tokens(ids), range(len(ids))
+            )
+        }
         return indices
 
     @staticmethod
@@ -475,7 +479,11 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                 obj_box[2] * width,
                 obj_box[3] * height,
             )
-            draw.rectangle([int(x_min), int(y_min), int(x_max), int(y_max)], outline='red', width=4)
+            draw.rectangle(
+                [int(x_min), int(y_min), int(x_max), int(y_max)],
+                outline="red",
+                width=4,
+            )
 
         return pil_img
 
@@ -684,7 +692,9 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                                 * scale_factor
                             )
                             grad_cond = torch.autograd.grad(
-                                loss.requires_grad_(True), [latents], retain_graph=True
+                                loss.requires_grad_(True),
+                                [latents],
+                                retain_graph=True,
                             )[0]
                             latents = (
                                 latents - grad_cond * self.scheduler.sigmas[i] ** 2

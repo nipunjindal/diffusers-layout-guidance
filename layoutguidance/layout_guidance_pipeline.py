@@ -14,6 +14,7 @@ from diffusers.pipelines.stable_diffusion import (
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import logging
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+from PIL import Image, ImageDraw
 
 logger = logging.get_logger(__name__)
 
@@ -429,15 +430,6 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                 H = W = int(np.sqrt(i))
 
                 total_maps += 1
-                print(
-                    len(self.attention_store.attention_store[location]),
-                    attn_map_integrated.shape,
-                    attn_map.shape,
-                    H,
-                    W,
-                    attn_map[0][0][0],
-                    location,
-                )
                 for obj_idx in range(object_number):
                     obj_loss = 0
                     obj_box = bboxes[obj_idx]
@@ -463,6 +455,29 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
 
         loss /= object_number * total_maps
         return loss
+
+    def get_indices(self, prompt: str) -> Dict[str, int]:
+        """Utility function to list the indices of the tokens you wish to alte"""
+        ids = self.tokenizer(prompt).input_ids
+        indices = {i: tok for tok, i in zip(self.tokenizer.convert_ids_to_tokens(ids), range(len(ids)))}
+        return indices
+
+    @staticmethod
+    def draw_box(pil_img: Image, bboxes: List[List[float]]) -> Image:
+        """Utility function to draw bbox on the image"""
+        width, height = pil_img.size
+        draw = ImageDraw.Draw(pil_img)
+
+        for obj_box in bboxes:
+            x_min, y_min, x_max, y_max = (
+                obj_box[0] * width,
+                obj_box[1] * height,
+                obj_box[2] * width,
+                obj_box[3] * height,
+            )
+            draw.rectangle([int(x_min), int(y_min), int(x_max), int(y_max)], outline='red', width=4)
+
+        return pil_img
 
     @torch.no_grad()
     def __call__(
@@ -674,8 +689,6 @@ class LayoutGuidanceStableDiffusionPipeline(StableDiffusionAttendAndExcitePipeli
                             latents = (
                                 latents - grad_cond * self.scheduler.sigmas[i] ** 2
                             )
-
-                            print(loss, guidance_iter, i)
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = (

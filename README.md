@@ -26,7 +26,7 @@ image = pipe(prompt, num_inference_steps=20,
              token_indices=[[2]],
              bboxes=bboxes).images[0]
 image = pipe.draw_box(image, bboxes)
-display(image)
+image.save("output.png")
 ```
 
 ## Image Examples

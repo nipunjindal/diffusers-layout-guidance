@@ -1,6 +1,7 @@
 # Diffusers based Training-Free Layout Control with Cross-Attention Guidance
 
-This repository provides an implementation of the paper Training-Free Layout Control with Cross-Attention Guidance using 🤗 Hugging Face Diffusion models. The original implementation by silen-chen is also acknowledged and extended here to make it more accessible. Special thanks to @silen-chen for sharing their work.
+This repository provides an implementation of the paper [Training-Free Layout Control with Cross-Attention Guidance](https://arxiv.org/abs/2304.03373) using 🤗 [Hugging Face](https://github.com/huggingface/diffusers) Diffusion models. The code is adaptation of the original implementation by silen-chen is also acknowledged and extended here to make it more accessible. Special thanks to [@silen-chen](https://github.com/silent-chen) for sharing their work. Additionally, we use the work in AttendExcite diffusers as reference.
+
 Currently, it only supports backward guidance. The forward guidance will be added soon.
 
 ## Installation
